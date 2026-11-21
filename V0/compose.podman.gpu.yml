@@ -1,0 +1,106 @@
+# Agent Memory Server (V0) — FULLY LOCAL, GPU — for the Ubuntu box.
+#
+# Same as compose.podman.yml, but:
+#   - the `ollama` container gets the NVIDIA GPU (CDI: nvidia.com/gpu=all)
+#   - generation model bumped to llama3.1:8b (fits an 8GB card alongside the
+#     embedder + context)
+#
+# Prereqs on the Ubuntu host (see GPU-BOX-SETUP.md):
+#   1. NVIDIA -open driver (R570+) installed, `nvidia-smi` sees the 5060 Ti
+#   2. nvidia-container-toolkit installed
+#   3. CDI spec generated:  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#
+#   cd V0 && podman-compose -f compose.podman.gpu.yml up -d
+#   podman exec v0_ollama_1 ollama pull nomic-embed-text
+#   podman exec v0_ollama_1 ollama pull llama3.1:8b
+#   podman exec v0_ollama_1 nvidia-smi        # confirm GPU is visible in-container
+#
+# DISABLE_AUTH=true -> tailnet/LAN only; do not expose publicly.
+
+volumes:
+  redis_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+networks:
+  server-network:
+    driver: bridge
+
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379
+  LONG_TERM_MEMORY: "True"
+  ENABLE_TOPIC_EXTRACTION: "True"
+  ENABLE_NER: "True"
+  DISABLE_AUTH: "true"
+  OPENAI_API_BASE: "http://ollama:11434/v1"
+  OPENAI_API_KEY: "ollama"
+  GENERATION_MODEL: "openai/llama3.1:8b"
+  EMBEDDING_MODEL: "openai/nomic-embed-text"
+  SLOW_MODEL: "openai/llama3.1:8b"
+  FAST_MODEL: "openai/llama3.1:8b"
+  REDISVL_VECTOR_DIMENSIONS: "768"
+
+services:
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    devices:
+      - nvidia.com/gpu=all            # <-- GPU via CDI
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  redis:
+    image: docker.io/redis/redis-stack-server:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  api:
+    image: docker.io/redislabs/agent-memory-server:0.15.2
+    environment:
+      <<: *common-env
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - ollama
+    command: ["agent-memory", "api", "--host", "0.0.0.0", "--port", "8000"]
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  mcp:
+    image: docker.io/redislabs/agent-memory-server:0.15.2
+    environment:
+      <<: *common-env
+    ports:
+      - "9050:9000"
+    depends_on:
+      - redis
+      - ollama
+    command: ["agent-memory", "mcp", "--mode", "sse", "--port", "9000"]
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  task-worker:
+    image: docker.io/redislabs/agent-memory-server:0.15.2
+    environment:
+      <<: *common-env
+    depends_on:
+      - redis
+      - ollama
+    command: ["agent-memory", "task-worker"]
+    networks:
+      - server-network
+    restart: unless-stopped

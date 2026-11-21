@@ -1,0 +1,103 @@
+# Rootless-podman compose for Agent Memory Server (V0) — FULLY LOCAL.
+#
+# All inference runs in the local `ollama` container via its OpenAI-compatible
+# API (http://ollama:11434/v1). No cloud keys, nothing leaves your network.
+#   - embeddings: nomic-embed-text (768 dims)
+#   - generation/extraction: llama3.2:3b
+#
+#   cd ~/Documents/agent-memory-server/V0
+#   podman-compose -f compose.podman.yml up -d
+#   # then pull the models once (see LAPTOP-SETUP.md):
+#   podman exec v0_ollama_1 ollama pull nomic-embed-text
+#   podman exec v0_ollama_1 ollama pull llama3.2:3b
+#
+# DISABLE_AUTH=true -> local/tailnet only; do not expose publicly.
+
+volumes:
+  redis_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+networks:
+  server-network:
+    driver: bridge
+
+# Shared config. Routed through Ollama's OpenAI-compatible endpoint, so the
+# model names carry the `openai/` prefix and OPENAI_API_BASE points at ollama.
+# OPENAI_API_KEY is a required-but-ignored dummy for the openai provider.
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379
+  LONG_TERM_MEMORY: "True"
+  ENABLE_TOPIC_EXTRACTION: "True"
+  ENABLE_NER: "True"
+  DISABLE_AUTH: "true"
+  OPENAI_API_BASE: "http://ollama:11434/v1"
+  OPENAI_API_KEY: "ollama"
+  GENERATION_MODEL: "openai/llama3.2:3b"
+  EMBEDDING_MODEL: "openai/nomic-embed-text"
+  SLOW_MODEL: "openai/llama3.2:3b"
+  FAST_MODEL: "openai/llama3.2:3b"
+  REDISVL_VECTOR_DIMENSIONS: "768"
+
+services:
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  redis:
+    image: docker.io/redis/redis-stack-server:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  api:
+    image: docker.io/redislabs/agent-memory-server:0.15.2
+    environment:
+      <<: *common-env
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - ollama
+    command: ["agent-memory", "api", "--host", "0.0.0.0", "--port", "8000"]
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  mcp:
+    image: docker.io/redislabs/agent-memory-server:0.15.2
+    environment:
+      <<: *common-env
+    ports:
+      - "9050:9000"
+    depends_on:
+      - redis
+      - ollama
+    command: ["agent-memory", "mcp", "--mode", "sse", "--port", "9000"]
+    networks:
+      - server-network
+    restart: unless-stopped
+
+  task-worker:
+    image: docker.io/redislabs/agent-memory-server:0.15.2
+    environment:
+      <<: *common-env
+    depends_on:
+      - redis
+      - ollama
+    command: ["agent-memory", "task-worker"]
+    networks:
+      - server-network
+    restart: unless-stopped
